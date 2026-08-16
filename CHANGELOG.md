@@ -1,0 +1,449 @@
+# Changelog
+
+FlareMo 使用 SemVer。每个 release 都要写清楚升级影响、Cloudflare 资源变化和 Memos 兼容面变化。
+
+## Unreleased
+
+flomo 回顾体系对齐（R3 第一批）与冗余文案清理。
+
+### 新增能力
+
+- 每日回顾：新增 `/review/daily` 页面，按「N 年前的今天」分组展示往年今日创建的 memo；后端 `GET /api/app/review/daily?date=YYYY-MM-DD`（时区由前端传本地日期规避）。
+- 随机漫步：新增 `/review/walk` 页面，从随机 memo 出发沿共享标签、引用关系游走（无关联时大跨越），支持漫步历史回看；「结束漫步」输出明信片式总结（经过条数、总字数、时间跨度）；后端 `GET /api/app/review/random`、`GET /api/app/review/walk`，返回 `via`（tag/relation/jump）标记路径来源。
+- 侧边栏 explorer 新增「回顾」区，含每日回顾与随机漫步入口。
+
+### 修复与清理
+
+- 删除 13 个未使用的 i18n 死文案 key（中英双语）与重复 key `update.open`（统一为 `update.title`）。
+- 接上已定义但未使用的文案：删除标签现在弹确认对话框（`explorer.tagDeleteConfirm`）；导入任务创建后提示 `toast.importStarted`，导出轮询提示 `toast.taskPending`（按 toast id 去重）。
+- 本地化硬编码字符串：标签树「展开/折叠」aria-label、Dialog/Sheet 的 sr-only Close、memo 详情页置顶徽章（新增 `memo.pinnedBadge`）。
+- 删除死代码：`DialogFooter` 永不渲染的 Close 按钮、`apps/web/src/api.ts` 中 7 个无调用方的导出函数。
+- 清理零信息增量的内部腔文案：登录/初始化页删除「登录状态仅保存在 HttpOnly Cookie…」安全说明和「原生访问」眉标（账户页同步移除）；简化初始化不可用、初始化密钥说明、改密影响说明和 PAT 描述的措辞。
+
+### Cloudflare、数据库与兼容影响
+
+- 无新增 D1 migration、无 R2 命名空间变化、无 Cloudflare 配置变化。
+- 仅 `/api/app/*` 新增三个端点（均需认证）；`/api/v1/*` Memos 兼容面不变。
+- 认证与 Origin 校验语义不变。
+
+## v0.6.0
+
+标签体系与大数据迁移版本。这个版本补齐了多级标签树和标签管理（R5），并落地大型导入导出任务管道（R6）：超过内联导出上限（32 MiB）的数据改走 R2 对象包 + 任务状态轮询，替代直接 413。数据库新增 `data_tasks` 一张表，全部是新增表，不影响既有数据。
+
+### 新增能力
+
+- 多级标签（R5）：内容提取支持 `#父/子` 层级路径和中文标点边界，`ListMemos` 的 `tag` 参数按前缀匹配（`工作` 命中 `工作/*`），统计返回去重层级树（同一 memo 不重复计数）。
+- 标签管理（R5）：explorer 侧边栏渲染可折叠层级标签树，标签 hover 提供重命名/移动（含子树，`工作` → `知识/工作` 会连后代一起移动）和删除；新增「无标签」筛选。改动同步更新 `memo_tags`、memo 的 `payload.tags` 和 memo 正文中的 `#标签` 文本（大小写不敏感）。
+- 大型导出任务（R6）：`POST /api/v1/export/tasks` 创建任务，分页读 D1（每 500 条）流式产出 NDJSON chunk 写入 R2 `exports/<task-id>/`，附件经认证端点逐个流式下载，`GET /api/v1/export/tasks/:id/manifest` 返回自包含校验清单（记录数、分块、附件清单）；前端导出改为任务流 + 轮询。
+- 导入任务（R6）：`POST /api/v1/import/tasks` 接收 JSON bundle，复用 domain 导入逻辑，返回 `202 {task, result}`；小型 bundle 仍走同步 `GET /api/v1/export` / `POST /api/v1/import`。
+- 32 MiB 判断修正（R6）：内联导出按完整序列化 JSON 大小（TextEncoder 估算，含 base64 膨胀）判断，不再只按附件原始字节。
+- 任务生命周期（R6）：`data_tasks` 表记录 kind/status/phase/attempts/lease/expiry，每日 cron 兜底把 stale `queued/running` 任务标记 `failed`、回收超过 7 天的任务行并清理对应 R2 导出产物。
+
+### Cloudflare、数据库与兼容影响
+
+- 新增 D1 migration `0010_deep_gateway.sql`：新增 `data_tasks` 表及三个索引（user+created、status+lease、expires）；全部是新增表，向后兼容上一正式版本，不需要回填。
+- R2 新增 `exports/<task-id>/` 和 `imports/` 命名空间：导出清单、NDJSON 分块和导入附件暂存对象使用独立前缀，与业务 `attachments/` 前缀隔离；`exports/` 前缀由每日 cron 清理。
+- 无 Worker 路由破坏性变化；`/api/v1/*` 新增 `export/tasks`、`import/tasks` 端点，全部需要认证。
+- Memos 兼容面不变：仍是已记录的 current camelCase REST、Better Auth-backed auth facade、PAT、legacy wire、Connect JSON/protobuf/gRPC-Web unary 子集、有限 SSE、无状态 `/mcp` 和 bounded webhook outbox。标签层级前缀筛选是对既有 `tag` 查询参数的语义增强。
+- Better Auth 认证边界不变：cookie session、`memos_pat_` PAT、native access/refresh JWT facade 和 Origin 校验语义与 v0.5.0 一致。
+
+### 升级说明
+
+- 执行标准的 `pnpm verify`、`pnpm deploy:dry-run` 和 `pnpm deploy`；`pnpm deploy` 会在发布 Worker 前自动应用 0010 migration。
+- 保持现有 `FLAREMO_PUBLIC_URL`、`FLAREMO_TRUSTED_ORIGINS`、`BETTER_AUTH_SECRET`、`FLAREMO_BOOTSTRAP_SECRET` 和已创建 PAT 配置；不要把任何 secret、密码、cookie 或 PAT 写入 Git、release notes、日志或聊天。
+- 部署后重新验证登录页、bootstrap status、受保护 API 的 JSON `401`、可信/不可信 Origin、公开分享、`/mcp`、标签树与标签管理、小型内联导出、大型导出任务（`/api/v1/export/tasks`）和导入任务。若启用 Cloudflare Access，它只能作为额外 policy，客户端仍必须提供 FlareMo 应用层 session 或 PAT。
+
+## v0.5.0
+
+Memos 兼容扩展版本。这个版本把 Memos-compatible 面从 memo/auth/shortcut 基础子集扩展到单用户 UserService 的 webhook/notification 资源、Attachment 的 bounded CEL 过滤和分页元数据，并把附件文件 URL 正式接入 Worker 路由。数据库新增通知、webhook 和 webhook 投递三张表，全部是新增表，不影响既有数据。
+
+### 新增能力
+
+- UserService 接入 webhook 与 notification 资源：webhook CRUD、signing-secret reveal、notification list/update/delete，以及 comment/mention notification payload 生成。
+- 四类 memo 事件（create/update/delete/comment）通过 D1 outbox 做有界异步 webhook 投递与重试；本版本仍是 FlareMo 的有界实现，不是完整上游 webhook 事件/egress 语义。
+- AttachmentService 的 `ListAttachments` 从 ad-hoc 正则过滤升级为共享 bounded CEL 运行时：支持 `filename` / `mime_type` / `create_time` / `memo_id` / `memo` 谓词、`contains` / `startsWith` / `endsWith` / `matches`、`in` 列表和 `now` / `duration` 时间算术；AST 节点数与长度受限，Worker 侧内存过滤有 10,000 行扫描上限。
+- comments、reactions、attachments 列表分页返回真实 `totalSize`，并同步到 REST、Connect、contracts schema、protobuf codec 和 OpenAPI。
+- Shortcut List/Create 的 `parent` 改为必填，`UpdateShortcut` 的 `updateMask` 支持 FieldMask 对象，与上游资源语义一致。
+- 附件文件 URL 桥接入 Worker 路由：`/file/attachments/{id}/{filename}` 支持 Better Auth/PAT/native access JWT 私有读取和 `share_token` 绑定的公开读取。
+- Memos 兼容实现改用 pinned 上游 proto 生成的 `@bufbuild/protobuf` descriptor runtime，覆盖 Memo/Auth/Shortcut/Attachment/User/Instance/IdentityProvider/AI 的普通 unary 编解码；手写 codec 只保留给历史 alias 和错误/status framing。
+- 认证 golden fixture 外置：native access/refresh JWT 增加段级 SHA-256 字节校验，refresh token 轮换字节确定性有独立 fixture。
+- 评论列表可见性：认证用户可见 owner + public + protected 评论，匿名仍只读 `PUBLIC + NORMAL`。
+
+### Cloudflare、数据库与兼容影响
+
+- 新增 D1 migration `0008_legal_scarecrow.sql` 和 `0009_neat_iron_fist.sql`：新增 `memos_notifications`、`memos_webhooks`、`memos_webhook_deliveries`、`memos_webhook_events` 表及索引；全部是新增表，向后兼容上一正式版本，不需要回填。
+- Worker 路由调整：`/file/*` 明确优先进入 Worker，不被 SPA 静态资源回退吞掉；`/api/*`、`/mcp`、`/openapi.json` 的行为保持不变。
+- 无 R2 或 Access 资源变化。Cloudflare Access 仍是可选外层 policy，不是应用身份来源。
+- Better Auth 认证边界不变：cookie session、`memos_pat_` PAT、native access/refresh JWT facade 和 Origin 校验语义与 v0.4.3 一致。
+- Memos 兼容面扩大为：current camelCase REST、Better Auth-backed auth facade、PAT、legacy wire、Connect JSON/protobuf/gRPC-Web unary 子集、有限 SSE、无状态 `/mcp`、单用户 UserService webhook/notification 资源子集和四类 memo 事件的 bounded outbox 投递/重试。不宣称完整 Memos Server parity、完整上游 webhook 事件/egress 语义、完整多用户 ACL、原生 JWT parity 或第三方客户端已验证。
+
+### 升级说明
+
+- 执行标准的 `pnpm verify`、`pnpm deploy:dry-run` 和 `pnpm deploy`；`pnpm deploy` 会在发布 Worker 前自动应用 0008/0009 migration。
+- 保持现有 `FLAREMO_PUBLIC_URL`、`FLAREMO_TRUSTED_ORIGINS`、`BETTER_AUTH_SECRET`、`FLAREMO_BOOTSTRAP_SECRET` 和已创建 PAT 配置；不要把任何 secret、密码、cookie 或 PAT 写入 Git、release notes、日志或聊天。
+- 部署后重新验证登录页、bootstrap status、受保护 API 的 JSON `401`、可信/不可信 Origin、公开分享、`/mcp`、附件文件读取和 webhook/notification 资源。若启用 Cloudflare Access，它只能作为额外 policy，客户端仍必须提供 FlareMo 应用层 session 或 PAT。
+
+## v0.4.3
+
+生产 Worker 路由收口补丁。这个版本把 Better Auth 和 Memos-compatible 入口在 Cloudflare Workers 静态资源回退下的路由边界正式收口，确保原生鉴权不依赖 Cloudflare Access 才能工作。
+
+### 已修复
+
+- `/api/*`、根 `/mcp` 和根 `/openapi.json` 明确优先进入 Worker；不会被 SPA 静态资源回退吞掉。
+- 未认证访问 `/api/app/health`、`/api/v1/openapi.json` 和 `/mcp` 返回 JSON `401`，而不是边缘路由导致的 `500` 或 HTML。
+- 根 OpenAPI 文档和 Streamable HTTP MCP 入口在生产自定义域名上保持 Worker 响应，继续复用 Better Auth cookie session、session bearer 或 `memos_pat_` PAT 的应用层身份边界。
+
+### Cloudflare、数据库与兼容影响
+
+- 本版本不新增 D1 migration，不改变 D1/R2 资源绑定；已完成 bootstrap 的实例不需要重新初始化。
+- Cloudflare Access 仍是可选的外层 policy，不是应用身份来源；生产主域名已通过 Better Auth 原生鉴权完成匿名 `401`、可信 Origin 和登录后的私有资源验证。
+- Memos 兼容面没有扩大：仍是已记录的 current camelCase REST、Better Auth-backed auth facade、PAT、legacy wire 和 `/mcp` 无状态 MCP 子集；不宣称完整 Memos Server parity、原生 JWT/refresh parity 或所有第三方客户端已验证。
+
+### 升级说明
+
+- 执行标准的 `pnpm verify`、`pnpm deploy:dry-run` 和 `pnpm deploy`；远端 D1 应显示没有待执行 migration。
+- 保持现有 `FLAREMO_PUBLIC_URL`、`FLAREMO_TRUSTED_ORIGINS`、`BETTER_AUTH_SECRET`、`FLAREMO_BOOTSTRAP_SECRET` 和已创建 PAT 配置；不要把任何 secret、密码、cookie 或 PAT 写入 Git、release notes、日志或聊天。
+- 部署后重新验证登录页、bootstrap status、受保护 API 的 JSON `401`、可信/不可信 Origin、公开分享和 `/mcp`。若启用 Cloudflare Access，它只能作为额外 policy，客户端仍必须提供 FlareMo 应用层 session 或 PAT。
+
+## v0.4.2
+
+Better Auth 与 Memos-compatible 集成收口版本。这个版本不新增 D1 migration，重点修复 partial bootstrap、current auth facade 和渠道 Worker 的应用层认证边界。
+
+### 已修复
+
+- bootstrap status 只有在 `auth_bootstrap` 的完成状态、owner IDs 和精确 `auth_user_links` 映射全部一致时才报告 `complete`；未来用户 link 或 partial write 不会误开放 setup。
+- 增加默认关闭的 `POST /api/auth/flaremo/recover-bootstrap` operator recovery，只协调唯一既有 Better Auth 身份与 `users/owner`，不接受用户名/密码、不创建第二个认证用户；多身份或歧义映射 fail closed 返回 `409`。
+- current Memos `auth/refresh` 的 session bearer 统一经过共享认证 context，补齐过期、PAT 拒绝和 trusted Origin 校验；无 Origin 的机器 session bearer 仍可用。
+- credential-bearing current signin/refresh 与 PAT 创建响应设置 `Cache-Control: no-store`；current signout 在同时收到 bearer 和 cookie 时会同时撤销 session 并清理 cookie。
+- Telegram Worker 改为必须使用 Better Auth `memos_pat_` PAT；Cloudflare Access headers 仅在成对配置时追加，缺失/半配置 fail closed，FlareMo 目标 URL 强制为 HTTPS origin。
+- bootstrap secret 最少 32 个字符；生产 `FLAREMO_PUBLIC_URL` 强制 HTTPS，本地 `.test`/localhost HTTP 仅用于开发测试。
+
+### Cloudflare、数据库与兼容影响
+
+- 本版本不新增 D1 migration；现有认证表和 PAT 仍必须纳入备份、恢复和演练范围。
+- Cloudflare Access 仍是可选外层 policy，不能替代 Better Auth cookie/session bearer 或 PAT。公开分享是否能穿过 Access 仍取决于 Cloudflare 控制面的精确 bypass policy。
+- 登录、bootstrap 和 operator recovery 的跨 edge 失败/请求限流需要在 Cloudflare WAF/Rate Limiting 配置；Worker 内置限流只是单 isolate 补充。
+- 继续提供已记录的 Memos-compatible 子集，不宣称完整 Memos Server parity、原生 JWT parity 或所有第三方客户端已验证。
+
+### 升级说明
+
+- 保持现有 `FLAREMO_PUBLIC_URL`、`FLAREMO_TRUSTED_ORIGINS`、Better Auth secrets 和已创建的 PAT 配置；不要把任何 secret、密码、cookie 或 PAT 写入 Git、release notes、日志或聊天。
+- 尚未 bootstrap 的实例需要使用不少于 32 个字符的 bootstrap secret；生产 canonical URL 必须是 HTTPS。
+- 若 bootstrap status 为 `recovery_required`，仅在批准的 operator recovery 窗口临时配置 recovery secret，调用 `recover-bootstrap` 后立即轮换或删除该 secret。
+- Telegram Worker 新增必需的 `FLAREMO_MEMOS_PAT` secret；生产仍启用 Access 时，再配置成对的 Access client ID/secret。
+
+## v0.4.1
+
+鉴权安全收口补丁。这个版本把 Better Auth、operator recovery 和 Memos-compatible auth facade 的安全边界收紧，同时不改变 D1 schema。
+
+### 已修复
+
+- Better Auth 的危险 cookie 请求（包括直接 Better Auth endpoint、bootstrap/recovery 和 current Memos signin/refresh）统一要求携带并精确匹配 trusted Origin；缺失或不可信 Origin 返回 `403`。
+- 增加独立、默认关闭的 `FLAREMO_RECOVERY_SECRET` operator recovery：只重置已完成 bootstrap 的既有 owner，复用 Better Auth 的一次性 reset/password hashing/session 撤销流程，并撤销所有 `memos_pat_`；不创建第二个 owner。
+- current Memos facade 的 PAT signout 现在会验证 PAT，随机/无效 PAT 不再得到假成功响应；Access headers 仍不能单独成为应用身份。
+- 明确记录当前没有 email provider，Better Auth 忘记密码邮件流程保持关闭；恢复能力与普通“知道当前密码时修改密码”不再混淆。
+
+### Cloudflare、数据库与兼容影响
+
+- 本版本不新增 D1 migration；已有 Better Auth 认证表仍必须包含在 D1 备份、恢复和演练范围内。
+- Cloudflare Access 仍只是可选外层 policy；Access headers 或 Service Token 不会成为 FlareMo 应用身份。
+- 本版本继续提供已记录的 Memos-compatible 子集，不宣称完整 Memos Server parity、原生 JWT parity 或第三方客户端已验证。
+
+### 升级说明
+
+- 保持现有 `FLAREMO_PUBLIC_URL`、`FLAREMO_TRUSTED_ORIGINS`、`BETTER_AUTH_SECRET` 和 `FLAREMO_BOOTSTRAP_SECRET` 配置；不要把 secret、密码、cookie 或 PAT 写入 Git、release notes、日志或聊天。
+- `FLAREMO_RECOVERY_SECRET` 默认不配置；只在批准的 operator recovery 窗口临时配置，成功后立即轮换或删除。
+- 升级后重新验证 trusted Origin、cookie session、PAT 创建/访问/撤销、旧 session/PAT 失效和公开分享；生产 authenticated smoke 若仍被 Cloudflare Access 拦截，必须通过已授权 Access session/token 验证，不能把 Access headers 当作应用身份。
+
+## v0.4.0
+
+Memos current 兼容与原生认证生态版本。这个版本把 FlareMo 从“有 Better Auth/PAT 基础的 Memos-compatible API”推进到默认 current camelCase REST、Better Auth-backed auth facade 和根 `/mcp` 无状态 Streamable HTTP MCP 子集，同时保留旧 wire 供已有客户端迁移。
+
+### 已包含
+
+- 接入 Better Auth + D1/Drizzle adapter：用户名/密码、HttpOnly cookie session、一次性 owner bootstrap，并关闭正常公共 signup。
+- 保留既有 `users/owner`、memo、attachment、R2 object key 和 share token，通过 `auth_user_links` 做认证身份到业务用户的桥接。
+- 增加 `memos_pat_` Personal Access Token 基础：由 cookie session 创建，明文只在创建时返回一次，可以列出元数据和撤销；PAT 可用于 current `/api/v1/*`、旧式 `/api/v1/mcp` 和根 `/mcp` 子集。
+- 新增 `FLAREMO_PUBLIC_URL`、可选 `FLAREMO_TRUSTED_ORIGINS` 两个公开 Worker vars；`BETTER_AUTH_SECRET` 和 `FLAREMO_BOOTSTRAP_SECRET` 必须通过 Wrangler secret 或 Cloudflare 控制台配置。
+- 增加按凭据区分的 Origin 安全契约：cookie session 的 `POST`、`PATCH`、`DELETE` 等状态变更必须携带并精确命中 allowlist；PAT 可以无 Origin，但携带 Origin 时也必须命中，否则返回 `403`。Access headers 不替代应用层 Origin 校验。
+- 默认 `/api/v1` 增加 current Memos camelCase / protobuf-JSON wire adapter，包括 current memo、attachment、relation、share、user、PAT DTO、current 大写枚举、有限 filter/order、分页、`updateMask`、nested relation/share 和标准错误。
+- 增加 Better Auth-backed current auth facade：`/api/v1/auth/me`、`signin`、`refresh`、`signout`。`accessToken` 是 opaque session-backed token，不是 Memos 原生 JWT。
+- 增加根 `/mcp` 无状态 JSON Streamable HTTP MCP 子集，支持 `initialize`、`notifications/initialized`、`tools/list` 和 `tools/call`；保留 `/api/v1/mcp` 旧式 JSON-RPC 工具名。
+- 增加 current OpenAPI 文档和显式 legacy wire negotiation；FlareMo Web 内部客户端明确选择 legacy wire，外部 `/api/v1` 调用默认选择 current wire。
+- 增加 current contracts、adapter、OpenAPI、MCP 和 Worker/E2E 测试，并记录第三方客户端仍需真实 smoke test 的兼容边界。
+
+### Cloudflare、数据库与兼容影响
+
+- 本版本不新增 D1 migration；已有 Better Auth 认证表仍必须包含在 D1 备份、恢复和演练范围内，包括 `auth_users`、`auth_sessions`、`auth_accounts`、`auth_verifications`、`auth_apikeys`、`auth_user_links` 和 `auth_bootstrap`。
+- 第一轮生产部署建议保留 Cloudflare Access。Access Service Token 只通过外层 policy，不自动成为 FlareMo 应用用户身份；启用 Access 时，机器请求仍需 FlareMo PAT。
+- 本版本不承诺完整 Memos Server parity、完整 CEL、Connect/gRPC、SSE、Memos 原生 JWT 字节级 parity、comments/reactions/shortcuts 或第三方客户端已验证。完整兼容矩阵见 `docs/memos-compatibility.md`。
+
+### 升级说明
+
+- 设置 `wrangler.jsonc` 中的 `FLAREMO_PUBLIC_URL`，并通过 `wrangler secret put` 配置两个 Better Auth secrets；不要把真实值写进仓库、release notes、issue、日志或聊天。
+- 本版本不需要新的 D1 migration；尚未 bootstrap 的实例仍需由部署者在生产 HTTPS 的 `/setup` 页面手动完成一次 owner bootstrap。bootstrap secret、用户名、邮箱和初始密码不进入 shell、Agent 输出、release notes、Git 或日志。
+- 验证 cookie session、密码修改后的其他 session 撤销、PAT 创建/访问/撤销、公开分享匿名访问和无凭据 `401`；同时验证 cookie mutation 的 trusted Origin、无 Origin 的 PAT，以及不可信 Origin 的 `403`。
+- 在认证与备份脚本完成远端演练前，不要关闭 Access，也不要把本次变更宣称为完整生产认证/恢复验收。生产入口仍可保留 Access 作为外层防线；Better Auth 是应用层身份来源。
+
+## v0.3.0
+
+自托管更新体验版本。这个版本让 Deploy Button 创建的 GitHub 仓库可以发现上游稳定 Release、准备可审查的升级 PR，并在合并后继续使用 Cloudflare Workers Builds 发布。
+
+### 已包含
+
+- 前端侧栏增加“系统更新”入口，显示当前版本、最新稳定版本、发布日期和 Release notes。
+- `/api/app/health` 增加版本元数据，支持把部署仓库配置为 `FLAREMO_DEPLOY_REPOSITORY`，从应用直接进入该仓库的更新 workflow。
+- 新增 `flaremo-update.yml`：每天或手工检查最新稳定 Release，根据两个 Release 之间的差异在用户部署仓库中创建升级 PR；它不依赖上游提交历史，检测到自定义代码冲突时停止且不覆盖 `main`。
+- `pnpm deploy` 会在 Worker 发布前自动应用远端 D1 migrations，使 Deploy Button 首装和后续 Workers Builds 更新使用同一条部署链路。
+- 增加中英文更新指南，并把 GitHub Actions 例外收窄为用户部署仓库的 Release 同步；它不承担项目 CI，不持有 Cloudflare 凭据，也不直接部署。
+- root、Web、Worker、contracts、db、domain、memos、OpenAPI 和 MCP 版本统一到 `0.3.0`。
+
+### Cloudflare、数据库与兼容影响
+
+- 不新增 D1 migration，不改变 D1、R2、Access、Cron 或 Memos-compatible `/api/v1/*` 行为。
+- 新增普通变量 `FLAREMO_DEPLOY_REPOSITORY`；值为用户部署仓库的 `owner/repository`。留空不影响笔记功能，只会让系统更新入口退回升级指南。
+- 从本版本起 `pnpm deploy` 自动执行 `pnpm migrate:remote`；已有 migration 会由 Wrangler 跟踪，不会重复应用。
+- 更新分支使用 Cloudflare 默认的 non-production `wrangler versions upload` 命令创建 preview；只有合并到 production branch 后的 `pnpm deploy` 才执行远端 migration。
+- GitHub Action 只使用当前部署仓库临时的 `GITHUB_TOKEN` 创建分支和 PR。Cloudflare Workers Builds 仍是唯一生产部署器。
+
+### 升级说明
+
+- v0.2.1 或更早实例需要最后手工升级一次到 v0.3.0。
+- 在生成的部署仓库中启用 Actions 的仓库写入和创建 PR 权限。
+- 把 `FLAREMO_DEPLOY_REPOSITORY` 设置为该 GitHub 仓库，例如 `octocat/flaremo`。
+- 以后可在 FlareMo 的系统更新入口运行更新 workflow，合并生成的 PR 后由 Cloudflare 自动部署。
+- GitLab 部署继续使用手工升级流程。
+
+## v0.2.1
+
+开发工具链安全补丁。这个版本把已经合并到 `main` 的依赖修复纳入正式发布，不改变 v0.2.0 的生产功能、数据模型或 Cloudflare 资源。
+
+### 已修复
+
+- 使用 pnpm parent-scoped override，将 `drizzle-kit` 旧加载器链中的传递依赖从受影响的 `esbuild@0.18.20` 固定到已修复的 `0.25.12`。
+- 重新生成 lockfile，移除旧 esbuild 及其平台二进制包；GitHub Dependabot 未解决告警恢复为 0。
+- 放宽 Miniflare hook 和 Playwright 本地服务器/单测试超时，避免低性能或多任务开发机上的发布门禁被环境启动速度误判为回归。
+- root、Web、Worker、contracts、db、domain、memos、OpenAPI 和 MCP 版本统一到 `0.2.1`。
+
+### Cloudflare、数据库与兼容影响
+
+- 不新增 D1 migration，不改变 D1、R2、Access、Cron 或 Worker 运行逻辑。
+- 不改变 `/api/app/*`、Memos-compatible `/api/v1/*`、OpenAPI 或 MCP 的行为合同。
+- 生产部署可以直接覆盖 v0.2.0，无需调整资源绑定或执行数据库迁移。
+
+### 升级说明
+
+```bash
+pnpm install
+pnpm verify
+pnpm deploy:dry-run
+pnpm deploy
+```
+
+## v0.2.0
+
+完整知识管理与数据可靠性版本。这个版本把搜索、附件、分享、关系、历史版本、导入导出和前端详情页一起补齐，并继续保持 Workers + D1 + R2 + Cloudflare Access 的原生架构。
+
+### 已包含
+
+- 增加 D1 FTS5 全文索引、规范化 `memo_tags` 表、稳定置顶游标分页和 SQL 聚合统计；不适合 FTS 查询语法的输入自动回退到安全模糊匹配。
+- 增加 `memo_revisions`，编辑时保存旧版本，并提供版本列表与恢复接口。
+- 增加 memo 上下文接口，一次返回附件、有效分享、正向关系、反向链接和历史版本；App 侧使用 D1 batch 收敛查询。
+- 分享支持复用、列出和撤销；公开分享继续校验 token、过期时间和 memo 状态，不暴露私有附件。
+- R2 附件增加 25 MiB 限制、ETag、Range、内联预览、安全 Content-Disposition、上传补偿、硬删除清理和每日孤儿清理 Cron。
+- 导入导出升级为 v2，保留时间、来源和关联数据，支持 `duplicate`、`skip`、`overwrite` 冲突策略，并清理被替换或未使用的 R2 对象。
+- 前端增加 Markdown/GFM、安全外链、图片与音频预览、独立 memo 详情路由、关系与反向链接、历史恢复和分享生命周期管理。
+- 搜索、标签和视图状态进入 URL；编辑、归档、恢复和删除使用带回滚的 TanStack Query 乐观缓存更新。
+- OpenAPI、MCP serverInfo、所有 workspace package 版本统一到 `0.2.0`；TypeScript 统一为 5.9，并更新 Workers types、Wrangler 和 Miniflare。
+- Worker 集成测试覆盖全文检索、历史恢复、反向链接、分享撤销、Range、硬删除和计划清理；E2E server 增加强制退出兜底。
+
+### Cloudflare 与数据库影响
+
+- 新增 migration `0002_wooden_professor_monster.sql`：创建 `memo_tags`、`memo_revisions`、FTS5 虚拟表与触发器，并给附件、分享和反向链接补索引及生命周期字段。
+- `wrangler.jsonc` 新增每天 `03:17 UTC` 的 Cron Trigger，用于清理超过 24 小时未绑定或处于删除中的附件。
+- 不新增 D1、R2、KV、Vectorize 或 Workers AI 资源；D1 仍是唯一事实源，R2 仍只保存对象。
+- 生产访问边界仍是 Cloudflare Access；不新增应用内 Bearer token 登录。
+
+### 升级说明
+
+```bash
+pnpm install
+pnpm verify
+pnpm deploy:dry-run
+pnpm migrate:remote
+pnpm deploy
+```
+
+- 必须先完成远端 migration，再让新 Worker 接受写请求。
+- 部署后检查 Cron Trigger 已创建，并抽查全文搜索、附件 Range/预览、公开分享和历史恢复。
+- 大于 32 MiB 的内联导出会返回 `413`；请使用元数据导出并单独备份 R2。
+- 本版本不包含 Vectorize 语义搜索、AI 回顾或平台专用聊天机器人。
+
+## v0.1.5
+
+前端性能、交互可靠性和移动端可用性优化版本。这个版本把列表查询、统计和附件元数据收敛为服务端分页合同，同时补齐失败恢复、危险操作确认和响应式验收。
+
+### 已包含
+
+- 首页从多列表请求和逐条附件查询收敛为当前视图分页请求与独立统计请求，附件元数据随 Memo 批量返回。
+- 增加 `/api/app/stats`，提供状态计数、标签统计、活跃天数和最近 84 天活动数据。
+- 列表改为服务端分页、搜索和精确标签过滤，修复复合游标的稳定排序，并增加“加载更多”交互。
+- 保存和附件上传失败时保留编辑器草稿，并对已上传对象执行补偿清理，避免半成品 Memo 或孤立附件。
+- 永久删除只在回收站提供，并使用确认对话框；移除点击时间戳归档的隐藏交互。
+- 移动端侧栏增加独立滚动区域，确保标签较多或屏幕较短时仍能访问导入、导出入口。
+- 活动热力图按周排列，月份和时区计算改为动态值，并将重复读屏信息收敛为一个摘要。
+- 增加错误、重试和非法导入反馈；优化深色品牌色、滚动条、首屏主题闪烁和长列表渲染。
+- E2E 使用隔离的 `.wrangler-e2e` 数据库，并覆盖请求瀑布、失败草稿、永久删除确认、分页与移动侧栏溢出。
+- Web 类型改为复用 `@flaremo/contracts`，减少前后端合同漂移。
+
+### 约束
+
+- 不新增 Cloudflare 资源。
+- 不新增 D1 migration。
+- 不改变 `/api/v1/*` Memos 兼容 API 合同。
+- 不引入 GitHub Actions。
+- 生产访问边界仍是 Cloudflare Access。
+
+### 升级说明
+
+- 自托管升级按常规流程执行 `pnpm verify`、`pnpm migrate:remote` 和 `pnpm deploy`。
+- 本次没有数据库结构变更，远端 migration 预期为 no-op。
+- 前端会改用新的 `/api/app/stats` 和分页参数，部署时应同时更新 Worker 与静态资源。
+
+## v0.1.4
+
+开源项目成熟度补强版本。这个版本不改变部署架构，重点是补齐公开协作、双语入口、工程门禁、Memos 生态兼容记录和 GitHub 仓库治理。
+
+### 已包含
+
+- 增加 `CODE_OF_CONDUCT.md`、`SUPPORT.md` 和 `CODEOWNERS`，补齐社区治理和支持入口。
+- 增加 `README.en.md`、`docs/en/deploy.md`、`docs/en/agent-deploy.md` 和 `docs/en/memos-compatibility.md`，提供最小英文入口。
+- 增加 `docs/memos-ecosystem.md`，公开记录 Memos 第三方客户端、脚本和 MCP 工具的兼容验证状态。
+- 根目录增加 `pnpm lint`、`pnpm format`、`pnpm format:check`，并把 `pnpm format:check` 纳入 `pnpm verify`。
+- Playwright E2E 扩大到创建/搜索、编辑/分享、归档/恢复、回收站/恢复/彻底删除和移动端导航。
+- Playwright 本地 webServer 启动前自动执行 `pnpm migrate:local`，避免 E2E 依赖本机残留 D1 schema。
+- Memos-compatible contract test 增加 OpenAPI 版本断言和公开分享附件隔离测试。
+- OpenAPI 版本同步到 `0.1.4`。
+- GitHub 仓库启用 main/tag rulesets、Dependabot security updates、vulnerability alerts、secret scanning 和 push protection。
+
+### 约束
+
+- 不新增 Cloudflare 资源。
+- 不新增 D1 migration。
+- 不改变 Memos 兼容 API 路径。
+- 不引入 GitHub Actions。
+- 生产访问边界仍是 Cloudflare Access。
+
+### 升级说明
+
+- 代码部署不需要额外 Cloudflare 操作。
+- 自托管升级按常规流程执行 `pnpm verify`、`pnpm deploy:dry-run` 和 `pnpm deploy`。
+- 如果本地 E2E 曾依赖旧的 `.wrangler` 状态，现在会在测试启动前自动应用本地 D1 migrations。
+
+## v0.1.3
+
+Deploy Button 文档修正版本。这个版本不改变运行时代码，只把实测得到的 Cloudflare Git provider 前置条件写进 README 和部署文档。
+
+### 已包含
+
+- README 的一键部署段落增加 GitHub/GitLab provider 连接说明。
+- `docs/deploy.md` 增加 `Connect a Git account to continue.` 的原因说明。
+
+### 约束
+
+- 不新增 Cloudflare 资源。
+- 不新增 D1 migration。
+- 不改变 Memos 兼容 API。
+
+### 升级说明
+
+- 代码部署不需要额外操作。
+- 如果使用 Deploy Button，需要先在 Cloudflare Dashboard 连接 GitHub 或 GitLab provider。
+
+## v0.1.2
+
+Deploy Button 实测记录补强版本。这个版本不改变运行时代码，只把 Cloudflare Dashboard 真实创建页的验证结果写进仓库。
+
+### 已包含
+
+- 更新 `docs/deploy-button-test.md`，记录 Chrome 登录态下进入 Workers `deploy-to-workers` 创建页的实际结果。
+- 记录 Cloudflare 能解析 FlareMo 的项目名、D1/R2 binding、环境变量、构建命令和部署命令。
+- 记录测试时如何把 D1/R2 从现有生产资源切到独立新建测试资源，避免误连生产数据。
+- 记录完整部署当前被 `Connect a Git account to continue.` 挡住，需要先在 Cloudflare Dashboard 连接 GitHub/GitLab provider。
+
+### 约束
+
+- 不新增 Cloudflare 资源。
+- 不新增 D1 migration。
+- 不改变 Memos 兼容 API。
+- 不静默执行 Git provider OAuth 授权。
+
+### 升级说明
+
+- 代码部署不需要额外操作。
+- 如果要完整跑通 Deploy Button，需要先在 Cloudflare Dashboard 连接 GitHub 或 GitLab provider。
+
+## v0.1.1
+
+开源项目基础设施补强版本。这个版本不改变部署架构，重点是让仓库首页、验证脚本、备份演练、兼容测试和发版流程更可信。
+
+### 已包含
+
+- README 增加真实桌面端和移动端截图，截图由 `pnpm screenshots` 从本地 Worker 实例生成。
+- 增加 `pnpm release <version>`，本地完成工作树、远端 main、tag、`pnpm verify`、`pnpm deploy:dry-run` 和 GitHub Release 检查。
+- 增加 `pnpm backup:drill`，覆盖本地 D1 导出、隔离恢复、恢复后 schema 查询、远端 migration 检查和 R2 bucket 检查。
+- 增加 Memos-compatible Worker contract test，覆盖 memo DTO shape、附件 export/import roundtrip 和 OpenAPI 路径。
+- `POST /api/v1/import` 返回值增加 `imported_attachments`，导入结果不再只统计 memo、relation 和 share。
+- README、维护文档、发版文档补齐截图、备份演练、发版脚本和兼容测试说明。
+
+### 约束
+
+- 项目仍不使用 GitHub Actions 作为 CI。
+- D1 仍是事实源，R2 仍只保存附件、导出包和对象文件。
+- Cloudflare Access 仍是生产访问边界，不增加应用内 Bearer token 登录。
+
+### 升级说明
+
+- 不需要新增 Cloudflare 资源。
+- 不需要执行新的 D1 migration。
+- 从旧版本升级代码后执行 `pnpm verify` 和 `pnpm deploy:dry-run`，确认通过后再部署。
+
+## v0.1.0
+
+首个公开可部署版本。这个版本把 FlareMo 收口成 Cloudflare-native、Memos-compatible 的自托管笔记系统，并补齐开源项目所需的部署、协作、Agent、发版和安全文档。
+
+### 已包含
+
+- Cloudflare Worker + Workers Static Assets 一体部署。
+- D1 schema 和 Drizzle migrations。
+- R2 附件存储。
+- memo、user、attachment、relation、share、setting 基础领域服务。
+- Memos 兼容 `/api/v1` 子集。
+- Flomo 风格的快速记录和时间线 UI。
+- 搜索、标签筛选、归档、回收站、活动热力图。
+- Memos 数据导入导出。
+- OpenAPI 输出。
+- MCP 端点。
+- 中英文界面。
+- Cloudflare Access 作为生产访问边界。
+- Deploy to Cloudflare 按钮。
+- 人工部署文档和 Agent 部署 runbook。
+- 维护、备份和恢复手册。
+- Memos 兼容矩阵。
+- 发版规则、贡献指南、安全策略、issue template 和 PR template。
+- `pnpm verify`、`pnpm migrate:local`、`pnpm migrate:remote`、`pnpm deploy:dry-run` 质量门禁。
+- 本地 Vitest 配置排除 `dist`，避免构建产物重复进入测试。
+- Playwright E2E 覆盖创建 memo 和标签筛选主路径。
+
+### 约束
+
+- 项目不使用 GitHub Actions 作为 CI。
+- 发布前由维护者在本地执行 `pnpm verify` 和 `pnpm deploy:dry-run`。
+- D1 是主数据事实源；R2 只存对象文件。
+- 生产访问边界由 Cloudflare Access 处理。
+
+### 升级说明
+
+- 生产部署前执行 `pnpm migrate:remote`。
+- 生产实例建议放在 Cloudflare Access 后面。
+- 脚本、Memos-compatible 客户端和 MCP 使用 Access Service Token。
